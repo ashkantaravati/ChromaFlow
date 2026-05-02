@@ -24,7 +24,7 @@ func main() {
 	// Initialize components
 	q := queue.NewMemoryQueue(cfg.QueueSize)
 	s := storage.NewMemoryStorage()
-	g := pdf.NewGenerator(cfg.PageTimeout)
+	g := pdf.NewGenerator(cfg.PageTimeout, cfg.ChromeWSURL)
 	pool := worker.NewPool(q, s, g, cfg.NumWorkers)
 
 	// Start worker pool
