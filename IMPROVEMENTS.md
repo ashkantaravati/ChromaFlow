@@ -1,41 +1,45 @@
 # Improvements
 
+ChromaFlow now has baseline CI/CD, release artifacts, health endpoints, and packaging metadata. The items below are the next production-readiness milestones.
+
 ## Reliability
 
-- Add tests for API status transitions, queue overflow behavior, worker success/failure paths, and configuration parsing.
+- Add tests for worker success/failure paths, websocket snapshots, PDF generation abstractions, and configuration parsing.
 - Replace the in-memory result map with TTL eviction and limits on total stored PDF bytes.
 - Add a `sync.WaitGroup` to the worker pool so graceful shutdown waits for in-flight jobs or marks them failed cleanly.
-- Return `202 Accepted` for submitted jobs and clearer status codes for failed/unknown jobs.
-- Add structured logging with job IDs, duration, URL host, output size, and failure reason.
+- Return richer machine-readable error payloads instead of plain text `http.Error` responses.
+- Add structured logging with job IDs, duration, URL host, output size, worker ID, and failure reason.
+- Add retry policies for transient Chromium/page failures.
 
 ## Security
 
-- Validate submitted URLs before enqueueing: allow only `http` and `https` unless explicitly configured otherwise.
-- Add SSRF protections: block loopback, link-local, private networks, metadata IPs, and redirects to forbidden addresses.
-- Consider request authentication or rate limiting before exposing the service outside a trusted network.
-- Limit input URL length and JSON request body size.
-- Run Chromium with the least privileges possible and review whether `NoSandbox(true)` is only used inside trusted containers.
+- Add full SSRF protections: block loopback, link-local, private networks, metadata IPs, internal hostnames, DNS rebinding, and redirects to forbidden addresses.
+- Consider request authentication and authorization before exposing the service outside a trusted network.
+- Add explicit rate limiting per client/API key.
+- Limit maximum PDF output size and total in-memory result storage.
+- Review Chromium sandbox settings for each deployment target. The current launcher uses `NoSandbox(true)` for compatibility with many container environments.
 
 ## Scalability
 
-- Add a durable queue such as Redis, Postgres, NATS, or another backend so jobs survive restarts.
-- Store generated PDFs in object storage or on disk instead of process memory.
-- Reuse a browser instance or a browser pool to avoid launching Chromium for every job.
-- Add queue depth and worker metrics for autoscaling and operational visibility.
-- Add job cancellation and retry policies.
+- Add a Redis-backed queue/result backend so jobs survive restarts and multiple ChromaFlow instances can process one shared queue.
+- Store generated PDFs in object storage or durable disk instead of process memory.
+- Reuse a browser instance or browser pool to avoid launching Chromium for every job.
+- Add queue depth, worker utilization, render duration, and error metrics for autoscaling and operational visibility.
+- Add job cancellation and idempotency keys.
 
 ## Product/API
 
 - Add PDF options such as page size, margins, landscape mode, print background, and CSS page size preference.
+- Add additional Chrome-powered job types behind a versioned API, such as screenshots, page metadata extraction, and accessibility snapshots.
 - Add webhook callbacks for completed or failed jobs.
-- Add a health endpoint and readiness endpoint.
 - Add dashboard filtering/search and per-job detail views.
 - Add an endpoint to delete a result before TTL expiry.
-- Include `created_at`, `started_at`, `finished_at`, and duration fields in job status responses.
+- Include `started_at`, `finished_at`, and duration fields in job status responses.
 
-## Packaging
+## Packaging and operations
 
-- Add a `.dockerignore` to keep build contexts small.
-- Pin the Alpine base image version instead of using `alpine:latest`.
-- Document local Chromium setup for Linux/macOS more thoroughly.
-- Add CI that runs `go test ./...` and builds the Docker image.
+- Add signed release artifacts and container provenance attestations.
+- Add SBOM generation for release artifacts.
+- Publish example systemd and Windows service configurations for direct binary deployments.
+- Add Kubernetes manifests or a Helm chart once the Redis backend is available.
+- Document local Chromium setup for Linux/macOS/Windows more thoroughly.
