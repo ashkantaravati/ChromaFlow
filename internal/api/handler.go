@@ -5,8 +5,11 @@ import (
 	"chromaflow/internal/realtime"
 	"chromaflow/internal/storage"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,14 +35,17 @@ type SubmitResponse struct {
 }
 
 func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	var req SubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	if req.URL == "" {
-		http.Error(w, "URL is required", http.StatusBadRequest)
+	req.URL = strings.TrimSpace(req.URL)
+	if err := validateURL(req.URL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -57,6 +63,11 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	// Push to queue
 	if err := h.queue.Push(job); err != nil {
+		h.storage.Delete(jobID)
+		if errors.Is(err, queue.ErrQueueFull) {
+			http.Error(w, "Queue is full", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "Failed to queue job", http.StatusInternalServerError)
 		return
 	}
@@ -67,6 +78,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -105,6 +117,37 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) JobsWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.hub.ServeJobs(w, r, h.storage.List)
+}
+
+func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (h *Handler) Readyz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+}
+
+func validateURL(rawURL string) error {
+	if rawURL == "" {
+		return errors.New("URL is required")
+	}
+
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return errors.New("URL must be absolute and valid")
+	}
+	if parsed.Host == "" {
+		return errors.New("URL must include a host")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("URL scheme must be http or https")
+	}
+
+	return nil
 }
 
 var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype html>

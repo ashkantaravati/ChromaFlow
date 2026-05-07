@@ -18,9 +18,11 @@ import (
 	"time"
 )
 
+var version = "dev"
+
 func main() {
 	cfg := config.Load()
-	log.Printf("Starting chromaflow v0 with %d workers", cfg.NumWorkers)
+	log.Printf("Starting chromaflow %s with %d workers", version, cfg.NumWorkers)
 
 	// Initialize components
 	q := queue.NewMemoryQueue(cfg.QueueSize)
@@ -42,6 +44,12 @@ func main() {
 	mux.HandleFunc("POST /pdf", handler.SubmitJob)
 	mux.HandleFunc("GET /pdf/{id}", handler.GetJob)
 	mux.HandleFunc("GET /ws/jobs", handler.JobsWebSocket)
+	mux.HandleFunc("GET /healthz", handler.Healthz)
+	mux.HandleFunc("GET /readyz", handler.Readyz)
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"version":%q}`+"\n", version)
+	})
 
 	// Start server
 	server := &http.Server{

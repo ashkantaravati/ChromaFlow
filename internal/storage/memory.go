@@ -54,6 +54,27 @@ func (s *MemoryStorage) Set(jobID string, result *queue.JobResult) error {
 	return nil
 }
 
+func (s *MemoryStorage) Delete(jobID string) {
+	s.mu.Lock()
+	if _, ok := s.results[jobID]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.results, jobID)
+	for i, id := range s.order {
+		if id == jobID {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+	onSet := s.onSet
+	s.mu.Unlock()
+
+	if onSet != nil {
+		onSet()
+	}
+}
+
 func (s *MemoryStorage) Get(jobID string) (*queue.JobResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

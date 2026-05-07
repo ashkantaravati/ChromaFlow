@@ -1,5 +1,9 @@
 package queue
 
+import "errors"
+
+var ErrQueueFull = errors.New("queue is full")
+
 type MemoryQueue struct {
 	jobs chan Job
 }
@@ -11,8 +15,12 @@ func NewMemoryQueue(size int) *MemoryQueue {
 }
 
 func (q *MemoryQueue) Push(job Job) error {
-	q.jobs <- job
-	return nil
+	select {
+	case q.jobs <- job:
+		return nil
+	default:
+		return ErrQueueFull
+	}
 }
 
 func (q *MemoryQueue) Pop() <-chan Job {
