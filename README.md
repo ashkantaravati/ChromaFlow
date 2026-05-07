@@ -5,10 +5,16 @@ Chromaflow is a small Go service that turns web pages into PDF files. Clients su
 ## Features
 
 - HTTP API for submitting URL-to-PDF jobs.
+- Browser dashboard at `/` for submitting jobs and watching status updates.
+- WebSocket stream at `/ws/jobs` for real-time job snapshots.
 - In-memory job queue and result store.
 - Configurable worker count, queue size, and page timeout.
 - Headless Chromium rendering through [go-rod](https://github.com/go-rod/rod).
 - Docker image with Chromium installed.
+
+## Web Interface
+
+Open `http://localhost:8080/` in a browser to submit PDF jobs and watch the current in-memory job queue update in real time. Completed jobs include a download link for the generated PDF.
 
 ## API
 
@@ -91,6 +97,25 @@ Or use Compose:
 
 ```sh
 docker compose up --build
+```
+
+## WebSocket Events
+
+Connect to `ws://localhost:8080/ws/jobs` to receive full queue snapshots whenever a job changes state. Messages look like:
+
+```json
+{
+  "type": "jobs",
+  "jobs": [
+    {
+      "id": "...",
+      "url": "https://example.com",
+      "status": "completed",
+      "created_at": "2026-05-01T09:18:54Z",
+      "updated_at": "2026-05-01T09:18:56Z"
+    }
+  ]
+}
 ```
 
 ## Development Notes

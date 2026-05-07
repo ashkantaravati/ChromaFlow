@@ -47,13 +47,14 @@ func (p *Pool) processJob(ctx context.Context, job queue.Job) {
 	log.Printf("Processing job %s: %s", job.ID, job.URL)
 
 	// Update status to processing
-	p.storage.Set(job.ID, &queue.JobResult{Status: queue.StatusProcessing})
+	p.storage.Set(job.ID, &queue.JobResult{URL: job.URL, Status: queue.StatusProcessing})
 
 	// Generate PDF
 	pdfBytes, err := p.generator.GeneratePDF(ctx, job.URL)
 	if err != nil {
 		log.Printf("Job %s failed: %v", job.ID, err)
 		p.storage.Set(job.ID, &queue.JobResult{
+			URL:    job.URL,
 			Status: queue.StatusFailed,
 			Error:  err.Error(),
 		})
@@ -62,6 +63,7 @@ func (p *Pool) processJob(ctx context.Context, job queue.Job) {
 
 	// Store result
 	p.storage.Set(job.ID, &queue.JobResult{
+		URL:    job.URL,
 		Status: queue.StatusCompleted,
 		PDF:    pdfBytes,
 	})

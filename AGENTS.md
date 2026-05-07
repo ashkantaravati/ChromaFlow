@@ -16,12 +16,17 @@ Use `/tmp/chromaflow-gocache` for Go commands when the default user Go cache is 
 ## Code Map
 
 - `cmd/server/main.go`: application wiring, HTTP routes, worker startup, graceful shutdown.
-- `internal/api/handler.go`: `POST /pdf` submission and `GET /pdf/{id}` status/PDF responses.
+- `internal/api/handler.go`: dashboard page, `POST /pdf` submission, `GET /pdf/{id}` status/PDF responses, and `GET /ws/jobs` websocket handler.
 - `internal/config/config.go`: environment configuration.
 - `internal/pdf/generator.go`: Chromium launch/connect and PDF rendering.
 - `internal/queue/`: in-memory job queue and job/result types.
-- `internal/storage/`: in-memory result storage.
+- `internal/realtime/`: small stdlib WebSocket hub for broadcasting queue snapshots.
+- `internal/storage/`: in-memory result storage and job snapshot listing.
 - `internal/worker/`: worker pool and job processing.
+
+## Commit Guidelines
+
+- Use semantic commit messages in the form `type(scope): short imperative summary`, for example `feat(dashboard): add live job queue` or `fix(pdf): handle chromium launch errors`.
 
 ## Development Guidelines
 
@@ -30,4 +35,4 @@ Use `/tmp/chromaflow-gocache` for Go commands when the default user Go cache is 
 - Keep per-job timeout/cancellation behavior intact when editing PDF generation.
 - Be careful with arbitrary URLs. Changes that broaden URL support should consider SSRF, local file access, redirects, and private network targets.
 - Do not introduce persistent storage, authentication, or external queues without updating `README.md` and `IMPROVEMENTS.md`.
-- Add or update tests for queue behavior, handler status transitions, and PDF generation abstractions when changing those areas.
+- Add or update tests for queue behavior, handler status transitions, websocket snapshots, and PDF generation abstractions when changing those areas.

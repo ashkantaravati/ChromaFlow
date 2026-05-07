@@ -5,6 +5,7 @@ import (
 	"chromaflow/internal/config"
 	"chromaflow/internal/pdf"
 	"chromaflow/internal/queue"
+	"chromaflow/internal/realtime"
 	"chromaflow/internal/storage"
 	"chromaflow/internal/worker"
 	"context"
@@ -24,6 +25,8 @@ func main() {
 	// Initialize components
 	q := queue.NewMemoryQueue(cfg.QueueSize)
 	s := storage.NewMemoryStorage()
+	hub := realtime.NewHub()
+	s.SetOnChange(func() { hub.BroadcastJobs(s.List()) })
 	g := pdf.NewGenerator(cfg.PageTimeout, cfg.ChromeWSURL)
 	pool := worker.NewPool(q, s, g, cfg.NumWorkers)
 
@@ -33,10 +36,12 @@ func main() {
 	pool.Start(ctx)
 
 	// Setup HTTP routes
-	handler := api.NewHandler(q, s)
+	handler := api.NewHandler(q, s, hub)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", handler.Dashboard)
 	mux.HandleFunc("POST /pdf", handler.SubmitJob)
 	mux.HandleFunc("GET /pdf/{id}", handler.GetJob)
+	mux.HandleFunc("GET /ws/jobs", handler.JobsWebSocket)
 
 	// Start server
 	server := &http.Server{

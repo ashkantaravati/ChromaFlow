@@ -29,6 +29,7 @@
 - Add PDF options such as page size, margins, landscape mode, print background, and CSS page size preference.
 - Add webhook callbacks for completed or failed jobs.
 - Add a health endpoint and readiness endpoint.
+- Add dashboard filtering/search and per-job detail views.
 - Add an endpoint to delete a result before TTL expiry.
 - Include `created_at`, `started_at`, `finished_at`, and duration fields in job status responses.
 
