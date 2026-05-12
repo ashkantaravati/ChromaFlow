@@ -1,10 +1,10 @@
 # Improvements
 
-ChromaFlow now has baseline CI/CD, release artifacts, health endpoints, Prometheus-format metrics, structured JSON logs, OpenAPI documentation, Docker Compose observability, Kubernetes manifests, and packaging metadata. The items below are the next production-readiness milestones.
+ChromaFlow now has baseline CI/CD, release artifacts, health endpoints, Prometheus-format metrics, structured JSON logs, OpenAPI documentation, Docker Compose observability, Kubernetes manifests, Redis-backed queue/result metadata, MinIO-compatible PDF object storage, idempotency keys, cancellation endpoints, reusable Chromium, and packaging metadata. The items below are the next production-readiness milestones.
 
 ## Reliability
 
-- Add tests for worker success/failure paths, websocket snapshots, PDF generation abstractions, and configuration parsing.
+- Add more tests for worker success/failure paths, websocket snapshots, PDF generation abstractions, Redis/S3 integration, and configuration parsing.
 - Replace the in-memory result map with TTL eviction and limits on total stored PDF bytes.
 - Add a `sync.WaitGroup` to the worker pool so graceful shutdown waits for in-flight jobs or marks them failed cleanly.
 - Return richer machine-readable error payloads instead of plain text `http.Error` responses.
@@ -21,12 +21,10 @@ ChromaFlow now has baseline CI/CD, release artifacts, health endpoints, Promethe
 
 ## Scalability
 
-- Add a Redis-backed queue/result backend so jobs survive restarts and multiple ChromaFlow instances can process one shared queue.
-- Store generated PDFs in object storage such as MinIO or durable disk instead of process memory.
 - Evaluate RabbitMQ or Kafka for asynchronous job lifecycle events, webhooks, and integration streams after the Redis/object-storage design is stable.
-- Reuse a browser instance or browser pool to avoid launching Chromium for every job.
+- Expand the reusable browser implementation into a configurable browser pool with health checks and per-worker isolation.
 - Expand metrics with worker utilization, timeout/error classifications, Chromium launch/connect timings, and autoscaling-friendly saturation signals.
-- Add job cancellation and idempotency keys.
+- Add cancellation propagation into Chromium page rendering so in-flight browser work stops immediately when a job is canceled.
 
 ## Product/API
 

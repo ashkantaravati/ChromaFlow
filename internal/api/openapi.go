@@ -4,7 +4,7 @@ var openAPISpec = []byte(`openapi: 3.0.3
 info:
   title: ChromaFlow API
   version: 0.1.0
-  description: API for submitting webpage-to-PDF jobs, polling job status, downloading completed PDFs, and operating ChromaFlow.
+  description: API for submitting webpage-to-PDF jobs, polling job status, canceling jobs, downloading completed PDFs, and operating ChromaFlow.
 servers:
   - url: http://localhost:8080
 paths:
@@ -41,12 +41,30 @@ paths:
               schema:
                 type: string
         '503':
-          description: In-memory queue is full.
+          description: Queue backend is full.
           content:
             text/plain:
               schema:
                 type: string
   /pdf/{id}:
+    delete:
+      summary: Cancel a queued or processing job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job canceled or already terminal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+        '404':
+          description: Job not found.
     get:
       summary: Fetch job status or completed PDF
       parameters:
@@ -73,6 +91,25 @@ paths:
             text/plain:
               schema:
                 type: string
+  /pdf/{id}/cancel:
+    post:
+      summary: Cancel a queued or processing job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job canceled or already terminal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+        '404':
+          description: Job not found.
   /ws/jobs:
     get:
       summary: Job snapshot websocket
@@ -142,6 +179,9 @@ components:
           type: string
           format: uri
           example: https://example.com
+        idempotency_key:
+          type: string
+          example: tenant-a-report-2026-05-12
     SubmitResponse:
       type: object
       required: [job_id, status_url]
@@ -152,6 +192,8 @@ components:
         status_url:
           type: string
           example: /pdf/00000000-0000-0000-0000-000000000000
+        idempotent:
+          type: boolean
     JobStatus:
       type: object
       required: [job_id, url, status, error]
@@ -164,7 +206,7 @@ components:
           format: uri
         status:
           type: string
-          enum: [pending, processing, completed, failed]
+          enum: [pending, processing, completed, failed, canceled]
         error:
           type: string
     JobSnapshotMessage:
@@ -190,7 +232,7 @@ components:
           format: uri
         status:
           type: string
-          enum: [pending, processing, completed, failed]
+          enum: [pending, processing, completed, failed, canceled]
         error:
           type: string
         created_at:

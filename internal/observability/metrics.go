@@ -208,21 +208,21 @@ func (m *Metrics) WritePrometheus(w http.ResponseWriter) {
 
 	if queueStats != nil {
 		depth, capacity := queueStats()
-		writeHelp(w, "chromaflow_queue_depth", "Current in-memory queue depth.", "gauge")
+		writeHelp(w, "chromaflow_queue_depth", "Current queue depth.", "gauge")
 		fmt.Fprintf(w, "chromaflow_queue_depth %d\n", depth)
-		writeHelp(w, "chromaflow_queue_capacity", "Configured in-memory queue capacity.", "gauge")
+		writeHelp(w, "chromaflow_queue_capacity", "Configured queue capacity.", "gauge")
 		fmt.Fprintf(w, "chromaflow_queue_capacity %d\n", capacity)
 	}
 
 	if storageStats != nil {
 		stats := storageStats()
-		writeHelp(w, "chromaflow_jobs_in_storage", "Current jobs tracked in memory by status.", "gauge")
+		writeHelp(w, "chromaflow_jobs_in_storage", "Current jobs tracked by status.", "gauge")
 		for _, status := range sortedJobStatusKeys(stats.ByStatus) {
 			fmt.Fprintf(w, "chromaflow_jobs_in_storage{status=%q} %d\n", status, stats.ByStatus[status])
 		}
-		writeHelp(w, "chromaflow_storage_jobs_total", "Current total jobs tracked in memory.", "gauge")
+		writeHelp(w, "chromaflow_storage_jobs_total", "Current total jobs tracked.", "gauge")
 		fmt.Fprintf(w, "chromaflow_storage_jobs_total %d\n", stats.Total)
-		writeHelp(w, "chromaflow_storage_pdf_bytes", "Current completed PDF bytes held in memory.", "gauge")
+		writeHelp(w, "chromaflow_storage_pdf_bytes", "Current completed PDF bytes tracked in storage metadata.", "gauge")
 		fmt.Fprintf(w, "chromaflow_storage_pdf_bytes %d\n", stats.PDFBytes)
 		if !stats.OldestJobAt.IsZero() {
 			writeHelp(w, "chromaflow_storage_oldest_job_timestamp_seconds", "Unix timestamp for oldest job tracked in memory.", "gauge")

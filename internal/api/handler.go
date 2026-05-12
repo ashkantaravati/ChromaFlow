@@ -1,6 +1,7 @@
 package api
 
 import (
+	"chromaflow/internal/blob"
 	"chromaflow/internal/observability"
 	"chromaflow/internal/queue"
 	"chromaflow/internal/realtime"
@@ -18,27 +19,30 @@ import (
 )
 
 type Handler struct {
-	queue   *queue.MemoryQueue
-	storage *storage.MemoryStorage
+	queue   queue.Backend
+	storage storage.Store
+	blobs   blob.Store
 	hub     *realtime.Hub
 	metrics *observability.Metrics
 	logger  *slog.Logger
 }
 
-func NewHandler(q *queue.MemoryQueue, s *storage.MemoryStorage, hub *realtime.Hub, metrics *observability.Metrics, logger *slog.Logger) *Handler {
+func NewHandler(q queue.Backend, s storage.Store, blobs blob.Store, hub *realtime.Hub, metrics *observability.Metrics, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{queue: q, storage: s, hub: hub, metrics: metrics, logger: logger}
+	return &Handler{queue: q, storage: s, blobs: blobs, hub: hub, metrics: metrics, logger: logger}
 }
 
 type SubmitRequest struct {
-	URL string `json:"url"`
+	URL            string `json:"url"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 type SubmitResponse struct {
-	JobID     string `json:"job_id"`
-	StatusURL string `json:"status_url"`
+	JobID      string `json:"job_id"`
+	StatusURL  string `json:"status_url"`
+	Idempotent bool   `json:"idempotent,omitempty"`
 }
 
 func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
@@ -58,21 +62,41 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+
 	jobID := uuid.New().String()
-	job := queue.Job{ID: jobID, URL: req.URL}
+	reservedJobID, reserved, err := h.storage.ReserveIdempotencyKey(r.Context(), idempotencyKey, jobID)
+	if err != nil {
+		h.recordRejected("idempotency_error")
+		h.logger.Error("idempotency reservation failed", slog.String("error", err.Error()))
+		http.Error(w, "Failed to reserve idempotency key", http.StatusInternalServerError)
+		return
+	}
+	if !reserved {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(SubmitResponse{JobID: reservedJobID, StatusURL: "/pdf/" + reservedJobID, Idempotent: true})
+		return
+	}
+
+	job := queue.Job{ID: jobID, URL: req.URL, IdempotencyKey: idempotencyKey}
 	now := time.Now().UTC()
 
 	// Initialize job as pending
-	h.storage.Set(jobID, &queue.JobResult{
-		URL:       req.URL,
-		Status:    queue.StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
+	_ = h.storage.Set(r.Context(), jobID, &queue.JobResult{
+		URL:            req.URL,
+		Status:         queue.StatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		IdempotencyKey: idempotencyKey,
 	})
 
 	// Push to queue
-	if err := h.queue.Push(job); err != nil {
-		h.storage.Delete(jobID)
+	if err := h.queue.Push(r.Context(), job); err != nil {
+		_ = h.storage.Delete(r.Context(), jobID)
 		if errors.Is(err, queue.ErrQueueFull) {
 			h.recordRejected("queue_full")
 			h.logger.Warn("job rejected", slog.String("reason", "queue_full"), slog.String("job_id", jobID))
@@ -95,13 +119,13 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 
-	result, err := h.storage.Get(jobID)
+	result, err := h.storage.Get(r.Context(), jobID)
 	if err != nil {
 		http.Error(w, "Job not found", http.StatusNotFound)
 		return
@@ -110,13 +134,19 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	if result.Status == queue.StatusCompleted {
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", "attachment; filename="+jobID+".pdf")
-		w.Write(result.PDF)
+		pdfBytes, err := h.blobs.Get(r.Context(), result.PDFKey)
+		if err != nil {
+			h.logger.Error("pdf fetch failed", slog.String("job_id", jobID), slog.String("error", err.Error()))
+			http.Error(w, "PDF not found", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(pdfBytes)
 		return
 	}
 
 	// Return status as JSON
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"job_id": jobID,
 		"url":    result.URL,
 		"status": result.Status,
@@ -132,7 +162,23 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) JobsWebSocket(w http.ResponseWriter, r *http.Request) {
-	h.hub.ServeJobs(w, r, h.storage.List)
+	h.hub.ServeJobs(w, r, func() []queue.JobSnapshot { return h.storage.List(r.Context()) })
+}
+
+func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("id")
+	result, err := h.storage.Cancel(r.Context(), jobID)
+	if err != nil {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"job_id": jobID,
+		"url":    result.URL,
+		"status": result.Status,
+		"error":  result.Error,
+	})
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {

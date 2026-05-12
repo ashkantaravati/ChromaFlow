@@ -2,14 +2,17 @@
 
 ChromaFlow is a Go HTTP service for turning web pages into PDF files with headless Chromium. Clients submit URL jobs through the API or the built-in dashboard, workers render each page with [go-rod](https://github.com/go-rod/rod), and the completed PDF is served from the job endpoint.
 
-The current service is intentionally small and self-contained: queue state and generated PDFs live in memory. It is suitable for single-node deployments today and is structured so a Redis-backed shared queue/result backend can be added for horizontal scaling later.
+ChromaFlow can run as a single-node in-memory service or as a horizontally scalable service using Redis for shared queue/result metadata and S3-compatible object storage such as MinIO for generated PDFs.
 
 ## Features
 
 - JSON API for URL-to-PDF job submission.
 - Browser dashboard at `/` for submitting jobs and watching state changes.
 - WebSocket job snapshot stream at `/ws/jobs`.
-- In-memory queue and result store with explicit full-queue responses.
+- Configurable in-memory or Redis-backed queue/result metadata backend with explicit full-queue responses.
+- Configurable in-memory or S3-compatible/MinIO PDF object storage.
+- Job cancellation and idempotency keys via request JSON or the `Idempotency-Key` header.
+- Reused Chromium browser instance to avoid launching a browser for every job.
 - Configurable worker count, queue size, and render timeout.
 - URL validation that accepts only absolute `http` and `https` URLs.
 - Headless Chromium rendering through go-rod.
@@ -23,10 +26,10 @@ The current service is intentionally small and self-contained: queue state and g
 ## Architecture
 
 ```text
-client/dashboard -> HTTP API -> in-memory queue -> worker pool -> Chromium -> in-memory result store
+client/dashboard -> HTTP API -> memory/Redis queue -> worker pool -> reused Chromium -> memory/Redis metadata
        ^                              |                                |
        |                              v                                v
-       +---------------------- WebSocket snapshots <------------- status/PDF endpoint
+       +---------------------- WebSocket snapshots <------------- status/PDF endpoint -> memory/MinIO PDFs
 ```
 
 Important directories:
@@ -38,9 +41,10 @@ Important directories:
 | `internal/config/config.go` | Environment variable configuration. |
 | `internal/observability/` | Prometheus-format metrics and structured JSON logging setup. |
 | `internal/pdf/generator.go` | Chromium launch/connect and PDF rendering. |
-| `internal/queue/` | In-memory queue and job types. |
+| `internal/queue/` | In-memory and Redis queue backends plus job types. |
 | `internal/realtime/` | Minimal stdlib websocket hub for job snapshots. |
-| `internal/storage/` | In-memory result storage and job snapshot listing. |
+| `internal/storage/` | In-memory and Redis job metadata storage and snapshot listing. |
+| `internal/blob/` | In-memory and S3-compatible PDF object storage. |
 | `internal/worker/` | Worker pool and job processing. |
 | `observability/` | Prometheus, Loki, Promtail, and Grafana provisioning used by Docker Compose. |
 | `k8s/` | Plain Kubernetes YAML for ChromaFlow, services, ingress, Prometheus, Grafana, Loki, and Promtail. |
@@ -52,6 +56,7 @@ Important directories:
 ```sh
 curl -i -X POST http://localhost:8080/pdf \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: tenant-a-example-report' \
   -d '{"url":"https://example.com"}'
 ```
 
@@ -64,10 +69,19 @@ Successful submissions return `202 Accepted`:
 }
 ```
 
+Submitting the same idempotency key again returns the original job ID and sets `idempotent: true`. You can also send `idempotency_key` in the JSON body.
+
+Cancel a queued or in-flight job with either endpoint:
+
+```sh
+curl -X DELETE http://localhost:8080/pdf/<job_id>
+curl -X POST http://localhost:8080/pdf/<job_id>/cancel
+```
+
 Validation and capacity errors:
 
 - `400 Bad Request` for invalid JSON, empty URLs, relative URLs, or schemes other than `http`/`https`.
-- `503 Service Unavailable` when the in-memory queue is full.
+- `503 Service Unavailable` when the configured queue backend is full.
 
 ### Fetch job status or PDF
 
@@ -131,7 +145,18 @@ Environment variables:
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP server port. |
 | `NUM_WORKERS` | `0` | Number of workers. `0` auto-detects as `runtime.NumCPU() * 2`. |
-| `QUEUE_SIZE` | `100` | In-memory queue buffer size. |
+| `QUEUE_SIZE` | `100` | Queue capacity for memory mode and soft cap for Redis mode. |
+| `QUEUE_BACKEND` | `memory` | Queue backend: `memory` or `redis`. |
+| `STORAGE_BACKEND` | `memory` | Job metadata backend: `memory` or `redis`. Defaults independently to memory. |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL for shared queue/result metadata. |
+| `REDIS_KEY_PREFIX` | `chromaflow` | Redis key namespace. |
+| `BLOB_BACKEND` | `memory` | PDF blob backend: `memory`, `s3`, or `minio`. |
+| `S3_ENDPOINT` | `localhost:9000` | S3-compatible endpoint for MinIO/object storage. |
+| `S3_ACCESS_KEY_ID` | `minioadmin` | S3 access key. |
+| `S3_SECRET_ACCESS_KEY` | `minioadmin` | S3 secret key. |
+| `S3_BUCKET` | `chromaflow-pdfs` | Bucket for generated PDF objects. |
+| `S3_REGION` | `us-east-1` | S3 signing region. |
+| `S3_USE_SSL` | `false` | Use HTTPS for object storage. |
 | `PAGE_TIMEOUT` | `30` | Per-page render timeout in seconds. |
 | `RESULT_TTL` | `3600` | Reserved for future result expiration. |
 | `CHROME_WS_URL` | empty | Existing Chrome DevTools websocket URL. Empty launches local Chromium. |
@@ -171,7 +196,7 @@ docker run --rm -p 8080:8080 \
   chromaflow
 ```
 
-Or use Compose, which also starts Prometheus, Grafana, Loki, and Promtail:
+Or use Compose, which starts ChromaFlow with Redis and MinIO by default, plus Prometheus, Grafana, Loki, and Promtail:
 
 ```sh
 docker compose up --build
@@ -184,6 +209,7 @@ Local service URLs:
 | `http://localhost:8080` | ChromaFlow dashboard/API. |
 | `http://localhost:8080/metrics` | ChromaFlow metrics scraped by Prometheus. |
 | `http://localhost:9090` | Prometheus. |
+| `http://localhost:9001` | MinIO console (`minioadmin` / `minioadmin` locally). |
 | `http://localhost:3000` | Grafana (`admin` / `admin` locally). The bundled dashboard uses Prometheus for metrics and Loki for logs. |
 | `http://localhost:3100` | Loki API. |
 
@@ -197,7 +223,7 @@ For this repository, replace `<owner>/<repo>` with the GitHub repository path af
 
 ## Kubernetes
 
-Plain manifests live in `k8s/` and deploy ChromaFlow plus Prometheus, Grafana, Loki, and Promtail into a `chromaflow` namespace. Replace the image placeholder in `k8s/chromaflow.yaml` before deploying:
+Plain manifests live in `k8s/` and deploy ChromaFlow, example Redis/MinIO dependencies, Prometheus, Grafana, Loki, and Promtail into a `chromaflow` namespace. Replace the image placeholder in `k8s/chromaflow.yaml` before deploying:
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
@@ -206,15 +232,25 @@ kubectl apply -f k8s/
 
 Ingress examples use `chromaflow.local` for the app and `grafana.chromaflow.local` for Grafana with an `nginx` ingress class. Production clusters should add TLS, persistent volumes for Prometheus/Loki/Grafana, real secrets, resource tuning, and environment-specific ingress annotations.
 
+## Load testing
+
+A small Go load-test helper submits concurrent jobs against a running ChromaFlow instance:
+
+```sh
+make load-test BASE_URL=http://127.0.0.1:8080 REQUESTS=50 CONCURRENCY=8 TARGET_URL=https://example.com
+```
+
+Use it with `docker compose up --build` to exercise the Redis/MinIO path locally.
+
 ## Future dependencies and auth
 
-The current single-node deployment keeps queue and PDF bytes in memory. The next scale-out design should add Redis for shared queue/result coordination, object storage such as MinIO for generated PDFs, optional RabbitMQ or Kafka for asynchronous job events, and token-based authentication before the API is exposed outside trusted networks. When these are added, update the OpenAPI security schemes, Kubernetes secrets/config maps, Docker Compose services, and operational docs together.
+Redis and MinIO support are now available for horizontal scaling. Optional RabbitMQ or Kafka for asynchronous job events, webhooks, and token-based authentication are still future work before the API is exposed outside trusted networks. When these are added, update the OpenAPI security schemes, Kubernetes secrets/config maps, Docker Compose services, and operational docs together.
 
 ## CI/CD and releases
 
 This repository includes two GitHub Actions workflows:
 
-- **CI** (`.github/workflows/ci.yml`) runs formatting, `go vet`, `go test -race ./...`, a Linux binary build, and a Docker image build on pushes and pull requests.
+- **CI** (`.github/workflows/ci.yml`) runs formatting, `go vet`, `go test -race ./...`, builds the load-test tool, builds a Linux binary, and builds a Docker image on pushes and pull requests.
 - **Release** (`.github/workflows/release.yml`) runs on tags matching `v*.*.*` and publishes:
   - Linux `amd64` and `arm64` binaries.
   - Windows `amd64` and `arm64` binaries.
@@ -232,14 +268,14 @@ git push origin v0.1.0
 ## Production notes
 
 - Treat submitted URLs as untrusted input. ChromaFlow currently restricts schemes to `http` and `https`, but production deployments should also add SSRF defenses for private networks, redirects, DNS rebinding, metadata endpoints, and internal-only hostnames before exposing the service publicly.
-- Jobs and PDFs are stored in memory. Restarts lose in-flight work and completed PDFs. Redis, MinIO, and optional message-broker integration are planned future changes, not active runtime dependencies yet.
+- Use `QUEUE_BACKEND=redis`, `STORAGE_BACKEND=redis`, and `BLOB_BACKEND=s3`/`minio` for restart-tolerant, multi-instance deployments. The in-memory backends remain useful for local development and single-node testing but do not survive process restarts.
 - Use resource limits around containers because Chromium can consume significant CPU and memory.
 - Keep `PAGE_TIMEOUT`, `QUEUE_SIZE`, and `NUM_WORKERS` aligned with host capacity.
 - Prefer the container image for consistent Chromium dependencies. Binary deployments must install and maintain Chrome/Chromium separately.
 
 ## Roadmap
 
-Near-term production hardening is tracked in `IMPROVEMENTS.md`. The main scalability milestone is a Redis-backed shared queue/result backend so multiple ChromaFlow instances can process jobs horizontally.
+Near-term production hardening is tracked in `IMPROVEMENTS.md`. Remaining scalability work includes browser-pool tuning, stronger Redis recovery semantics for interrupted processing jobs, autoscaling signals, and production Helm/Kustomize packaging.
 
 ## License
 
