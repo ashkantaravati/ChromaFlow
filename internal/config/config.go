@@ -15,11 +15,13 @@ type Config struct {
 	PageTimeout int    `env:"PAGE_TIMEOUT" envDefault:"30"` // seconds
 	ResultTTL   int    `env:"RESULT_TTL" envDefault:"3600"` // seconds (reserved for future expiry workers)
 	ChromeWSURL string `env:"CHROME_WS_URL" envDefault:""`  // empty = rod auto-launches a reusable browser
+	LogLevel    string `env:"LOG_LEVEL" envDefault:"info"`
 
-	QueueBackend   string `env:"QUEUE_BACKEND" envDefault:"memory"` // memory or redis
-	StorageBackend string `env:"STORAGE_BACKEND" envDefault:"memory"`
-	RedisURL       string `env:"REDIS_URL" envDefault:"redis://localhost:6379/0"`
-	RedisKeyPrefix string `env:"REDIS_KEY_PREFIX" envDefault:"chromaflow"`
+	QueueBackend           string `env:"QUEUE_BACKEND" envDefault:"memory"` // memory or redis
+	StorageBackend         string `env:"STORAGE_BACKEND" envDefault:"memory"`
+	RedisURL               string `env:"REDIS_URL" envDefault:"redis://localhost:6379/0"`
+	RedisKeyPrefix         string `env:"REDIS_KEY_PREFIX" envDefault:"chromaflow"`
+	RedisVisibilityTimeout int    `env:"REDIS_VISIBILITY_TIMEOUT" envDefault:"300"` // seconds
 
 	BlobBackend       string `env:"BLOB_BACKEND" envDefault:"memory"` // memory or s3
 	S3Endpoint        string `env:"S3_ENDPOINT" envDefault:"localhost:9000"`
@@ -28,6 +30,12 @@ type Config struct {
 	S3Bucket          string `env:"S3_BUCKET" envDefault:"chromaflow-pdfs"`
 	S3Region          string `env:"S3_REGION" envDefault:"us-east-1"`
 	S3UseSSL          bool   `env:"S3_USE_SSL" envDefault:"false"`
+
+	RequireIdempotencyKey bool   `env:"REQUIRE_IDEMPOTENCY_KEY" envDefault:"false"`
+	WebhookURL            string `env:"WEBHOOK_URL" envDefault:""`
+	WebhookTimeout        int    `env:"WEBHOOK_TIMEOUT" envDefault:"10"` // seconds
+	RenderMaxRetries      int    `env:"RENDER_MAX_RETRIES" envDefault:"1"`
+	RenderRetryBackoffMS  int    `env:"RENDER_RETRY_BACKOFF_MS" envDefault:"500"`
 }
 
 func Load() *Config {

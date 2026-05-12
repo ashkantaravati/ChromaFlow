@@ -3,21 +3,24 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"chromaflow/internal/redisx"
+
+	"github.com/google/uuid"
 )
 
 type RedisQueue struct {
-	client        *redisx.Client
-	queueKey      string
-	processingKey string
-	capacity      int
+	client            *redisx.Client
+	queueKey          string
+	processingKey     string
+	capacity          int
+	visibilityTimeout time.Duration
 }
 
-func NewRedisQueue(ctx context.Context, rawURL, prefix string, capacity int) (*RedisQueue, error) {
+func NewRedisQueue(ctx context.Context, rawURL, prefix string, capacity int, visibilityTimeout time.Duration) (*RedisQueue, error) {
 	client, err := redisx.New(rawURL)
 	if err != nil {
 		return nil, err
@@ -25,11 +28,10 @@ func NewRedisQueue(ctx context.Context, rawURL, prefix string, capacity int) (*R
 	if prefix == "" {
 		prefix = "chromaflow"
 	}
-	q := &RedisQueue{client: client, queueKey: prefix + ":queue", processingKey: prefix + ":processing", capacity: capacity}
-	if err := q.requeueProcessing(ctx); err != nil {
-		return nil, err
+	if visibilityTimeout <= 0 {
+		visibilityTimeout = 5 * time.Minute
 	}
-	return q, nil
+	return &RedisQueue{client: client, queueKey: prefix + ":queue", processingKey: prefix + ":processing", capacity: capacity, visibilityTimeout: visibilityTimeout}, nil
 }
 
 func (q *RedisQueue) Push(ctx context.Context, job Job) error {
@@ -42,6 +44,10 @@ func (q *RedisQueue) Push(ctx context.Context, job Job) error {
 			return ErrQueueFull
 		}
 	}
+	if job.QueueMessageID == "" {
+		job.QueueMessageID = uuid.NewString()
+	}
+	job.LeaseUntil = time.Time{}
 	data, err := json.Marshal(job)
 	if err != nil {
 		return err
@@ -57,34 +63,49 @@ func (q *RedisQueue) Pop(ctx context.Context) (Job, error) {
 			return Job{}, ctx.Err()
 		default:
 		}
-		v, err := q.client.Do(ctx, "BRPOPLPUSH", q.queueKey, q.processingKey, "5")
+		if err := q.requeueExpired(ctx, time.Now().UTC()); err != nil {
+			return Job{}, err
+		}
+		v, err := q.client.Do(ctx, "BRPOP", q.queueKey, "5")
 		if err != nil {
 			return Job{}, err
 		}
 		if v == nil {
 			continue
 		}
-		payload := redisx.String(v)
+		arr, _ := v.([]any)
+		if len(arr) < 2 {
+			continue
+		}
+		payload := redisx.String(arr[1])
 		var job Job
 		if err := json.Unmarshal([]byte(payload), &job); err != nil {
-			_, _ = q.client.Do(ctx, "LREM", q.processingKey, "1", payload)
 			return Job{}, err
 		}
-		job.QueueMessageID = payload
+		if job.QueueMessageID == "" {
+			job.QueueMessageID = uuid.NewString()
+		}
+		job.LeaseUntil = time.Now().UTC().Add(q.visibilityTimeout)
+		leasedPayload, err := json.Marshal(job)
+		if err != nil {
+			return Job{}, err
+		}
+		leased := string(leasedPayload)
+		_, err = q.client.Do(ctx, "ZADD", q.processingKey, strconv.FormatInt(job.LeaseUntil.Unix(), 10), leased)
+		if err != nil {
+			_, _ = q.client.Do(ctx, "LPUSH", q.queueKey, payload)
+			return Job{}, err
+		}
+		job.QueueMessageID = leased
 		return job, nil
 	}
 }
 
 func (q *RedisQueue) Ack(ctx context.Context, job Job) error {
-	payload := job.QueueMessageID
-	if payload == "" {
-		data, err := json.Marshal(job)
-		if err != nil {
-			return err
-		}
-		payload = string(data)
+	if job.QueueMessageID == "" {
+		return nil
 	}
-	_, err := q.client.Do(ctx, "LREM", q.processingKey, "1", payload)
+	_, err := q.client.Do(ctx, "ZREM", q.processingKey, job.QueueMessageID)
 	return err
 }
 
@@ -93,7 +114,7 @@ func (q *RedisQueue) Len(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	processing, err := q.client.Do(ctx, "LLEN", q.processingKey)
+	processing, err := q.client.Do(ctx, "ZCARD", q.processingKey)
 	if err != nil {
 		return 0, err
 	}
@@ -102,19 +123,32 @@ func (q *RedisQueue) Len(ctx context.Context) (int, error) {
 
 func (q *RedisQueue) Cap() int { return q.capacity }
 
-func (q *RedisQueue) requeueProcessing(ctx context.Context) error {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		v, err := q.client.Do(ctx, "RPOPLPUSH", q.processingKey, q.queueKey)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			return fmt.Errorf("recover processing queue: %w", err)
+func (q *RedisQueue) requeueExpired(ctx context.Context, now time.Time) error {
+	v, err := q.client.Do(ctx, "ZRANGEBYSCORE", q.processingKey, "-inf", strconv.FormatInt(now.Unix(), 10), "LIMIT", "0", "25")
+	if err != nil {
+		return fmt.Errorf("read expired processing jobs: %w", err)
+	}
+	arr, _ := v.([]any)
+	for _, item := range arr {
+		payload := redisx.String(item)
+		var job Job
+		if err := json.Unmarshal([]byte(payload), &job); err != nil {
+			_, _ = q.client.Do(ctx, "ZREM", q.processingKey, payload)
+			continue
 		}
-		if v == nil {
-			return nil
+		job.LeaseUntil = time.Time{}
+		data, err := json.Marshal(job)
+		if err != nil {
+			return err
+		}
+		_, err = q.client.Do(ctx, "ZREM", q.processingKey, payload)
+		if err != nil {
+			return err
+		}
+		_, err = q.client.Do(ctx, "LPUSH", q.queueKey, string(data))
+		if err != nil {
+			return err
 		}
 	}
-	return fmt.Errorf("recover processing queue timed out after 5s")
+	return nil
 }

@@ -3,12 +3,14 @@ package main
 import (
 	"chromaflow/internal/api"
 	"chromaflow/internal/blob"
+	"chromaflow/internal/cancellation"
 	"chromaflow/internal/config"
 	"chromaflow/internal/observability"
 	"chromaflow/internal/pdf"
 	"chromaflow/internal/queue"
 	"chromaflow/internal/realtime"
 	"chromaflow/internal/storage"
+	"chromaflow/internal/webhook"
 	"chromaflow/internal/worker"
 	"context"
 	"fmt"
@@ -24,8 +26,8 @@ import (
 var version = "dev"
 
 func main() {
-	logger := observability.NewLogger("chromaflow", version)
 	cfg := config.Load()
+	logger := observability.NewLogger("chromaflow", version, cfg.LogLevel)
 	logger.Info("starting chromaflow", slog.Int("workers", cfg.NumWorkers), slog.String("queue_backend", cfg.QueueBackend), slog.String("storage_backend", cfg.StorageBackend), slog.String("blob_backend", cfg.BlobBackend))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -58,12 +60,14 @@ func main() {
 	})
 	metrics.SetStorageStats(func() observability.StorageStats { return s.Stats(context.Background()) })
 	s.SetOnChange(func() { hub.BroadcastJobs(s.List(context.Background())) })
+	cancels := cancellation.NewRegistry()
+	notifier := webhook.NewNotifier(time.Duration(cfg.WebhookTimeout) * time.Second)
 	g := pdf.NewGenerator(cfg.PageTimeout, cfg.ChromeWSURL)
 	defer g.Close()
-	pool := worker.NewPool(q, s, blobs, g, cfg.NumWorkers, metrics, logger)
+	pool := worker.NewPoolWithOptions(q, s, blobs, g, cfg.NumWorkers, metrics, logger, cancels, notifier, worker.Options{RenderMaxRetries: cfg.RenderMaxRetries, RetryBackoff: time.Duration(cfg.RenderRetryBackoffMS) * time.Millisecond})
 	pool.Start(ctx)
 
-	handler := api.NewHandler(q, s, blobs, hub, metrics, logger)
+	handler := api.NewHandlerWithOptions(q, s, blobs, hub, metrics, logger, cancels, api.HandlerOptions{RequireIdempotencyKey: cfg.RequireIdempotencyKey, DefaultWebhookURL: cfg.WebhookURL})
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handler.Dashboard)
 	mux.HandleFunc("POST /pdf", handler.SubmitJob)
@@ -80,7 +84,7 @@ func main() {
 		fmt.Fprintf(w, `{"version":%q}`+"\n", version)
 	})
 
-	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port), Handler: metrics.Middleware(mux)}
+	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port), Handler: metrics.Middleware(observability.RequestMiddleware(mux))}
 
 	go func() {
 		logger.Info("server listening", slog.Int("port", cfg.Port))
@@ -95,13 +99,16 @@ func main() {
 	<-quit
 
 	logger.Info("shutting down")
-	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown failed", slog.String("error", err.Error()))
 		os.Exit(1)
+	}
+	cancel()
+	if err := pool.Wait(shutdownCtx); err != nil {
+		logger.Warn("worker shutdown did not complete before timeout", slog.String("error", err.Error()))
 	}
 	logger.Info("server stopped")
 }
@@ -111,7 +118,7 @@ func buildQueue(ctx context.Context, cfg *config.Config) (queue.Backend, error) 
 	case "", "memory":
 		return queue.NewMemoryQueue(cfg.QueueSize), nil
 	case "redis":
-		return queue.NewRedisQueue(ctx, cfg.RedisURL, cfg.RedisKeyPrefix, cfg.QueueSize)
+		return queue.NewRedisQueue(ctx, cfg.RedisURL, cfg.RedisKeyPrefix, cfg.QueueSize, time.Duration(cfg.RedisVisibilityTimeout)*time.Second)
 	default:
 		return nil, fmt.Errorf("unsupported QUEUE_BACKEND %q", cfg.QueueBackend)
 	}

@@ -5,7 +5,9 @@ import (
 	"chromaflow/internal/queue"
 	"chromaflow/internal/realtime"
 	"chromaflow/internal/storage"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -130,4 +132,45 @@ func TestCancelJobMarksPendingJobCanceled(t *testing.T) {
 	if result.Status != queue.StatusCanceled {
 		t.Fatalf("status = %s, want %s", result.Status, queue.StatusCanceled)
 	}
+}
+
+func TestSubmitJobRejectsMissingIdempotencyKeyWhenRequired(t *testing.T) {
+	h := NewHandlerWithOptions(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), blob.NewMemoryStore(), realtime.NewHub(), nil, nil, nil, HandlerOptions{RequireIdempotencyKey: true})
+	req := httptest.NewRequest(http.MethodPost, "/pdf", strings.NewReader(`{"url":"https://example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.SubmitJob(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	var errResp ErrorResponse
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp.Error != "missing_idempotency_key" {
+		t.Fatalf("error = %q", errResp.Error)
+	}
+}
+
+func TestSubmitJobRejectsWhenMetadataInitializationFails(t *testing.T) {
+	h := NewHandler(queue.NewMemoryQueue(1), failingStore{Store: storage.NewMemoryStorage()}, blob.NewMemoryStore(), realtime.NewHub(), nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/pdf", strings.NewReader(`{"url":"https://example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.SubmitJob(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+}
+
+type failingStore struct {
+	storage.Store
+}
+
+func (s failingStore) Set(ctx context.Context, jobID string, result *queue.JobResult) error {
+	return errors.New("metadata store unavailable")
 }

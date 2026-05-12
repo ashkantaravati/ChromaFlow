@@ -24,7 +24,10 @@ type Job struct {
 	ID             string
 	URL            string
 	IdempotencyKey string
+	CallbackURL    string
+	RequestID      string
 	QueueMessageID string
+	LeaseUntil     time.Time
 }
 
 type JobStatus string
@@ -45,6 +48,8 @@ type JobResult struct {
 	PDFSize        int
 	Error          string
 	IdempotencyKey string
+	CallbackURL    string
+	RequestID      string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

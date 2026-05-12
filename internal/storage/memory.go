@@ -44,9 +44,15 @@ func (s *MemoryStorage) Set(ctx context.Context, jobID string, result *queue.Job
 		}
 	}
 	result.UpdatedAt = now
-	if result.IdempotencyKey == "" {
-		if existing, ok := s.results[jobID]; ok {
+	if existing, ok := s.results[jobID]; ok {
+		if result.IdempotencyKey == "" {
 			result.IdempotencyKey = existing.IdempotencyKey
+		}
+		if result.CallbackURL == "" {
+			result.CallbackURL = existing.CallbackURL
+		}
+		if result.RequestID == "" {
+			result.RequestID = existing.RequestID
 		}
 	}
 

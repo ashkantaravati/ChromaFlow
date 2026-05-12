@@ -35,17 +35,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/SubmitResponse'
         '400':
-          description: Invalid JSON or URL.
+          description: Invalid JSON, URL, callback URL, or required idempotency key.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: Queue backend is full.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/ErrorResponse'
   /pdf/{id}:
     delete:
       summary: Cancel a queued or processing job
@@ -88,9 +88,9 @@ paths:
         '404':
           description: Job not found.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/ErrorResponse'
   /pdf/{id}/cancel:
     post:
       summary: Cancel a queued or processing job
@@ -182,6 +182,10 @@ components:
         idempotency_key:
           type: string
           example: tenant-a-report-2026-05-12
+        callback_url:
+          type: string
+          format: uri
+          example: https://client.example/webhooks/chromaflow
     SubmitResponse:
       type: object
       required: [job_id, status_url]
@@ -241,6 +245,18 @@ components:
         updated_at:
           type: string
           format: date-time
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: job_not_found
+        message:
+          type: string
+          example: Job not found
+        request_id:
+          type: string
     HealthStatus:
       type: object
       properties:

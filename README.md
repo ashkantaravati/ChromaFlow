@@ -31,6 +31,73 @@ client/dashboard -> HTTP API -> memory/Redis queue -> worker pool -> reused Chro
        |                              v                                v
        +---------------------- WebSocket snapshots <------------- status/PDF endpoint -> memory/MinIO PDFs
 ```
+### Integration architecture
+
+```mermaid
+flowchart LR
+  Client[API client or dashboard] -->|POST /pdf| API[ChromaFlow HTTP API]
+  API -->|metadata| Meta[(Memory or Redis metadata)]
+  API -->|enqueue job| Queue[(Memory queue or Redis shared queue)]
+  Queue --> Workers[Worker pool]
+  Workers --> Browser[Reusable Chromium browser]
+  Workers -->|PDF bytes| Blob[(Memory or MinIO/S3 object storage)]
+  Workers -->|status + PDF key| Meta
+  Workers -->|completed/failed event| Webhook[Optional webhook callback]
+  API -->|GET /pdf/id| Meta
+  API -->|download completed PDF| Blob
+  API -->|snapshots| WS[WebSocket /ws/jobs]
+```
+
+### Job workflow
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as API
+  participant M as Metadata store
+  participant Q as Queue
+  participant W as Worker
+  participant B as Browser
+  participant O as Object storage
+  participant H as Webhook receiver
+
+  C->>A: POST /pdf {url, idempotency_key?, callback_url?}
+  A->>M: reserve optional idempotency key and create pending job
+  A->>Q: enqueue job
+  A-->>C: 202 {job_id, status_url}
+  W->>Q: pop job with Redis visibility lease or memory receive
+  W->>M: mark processing
+  W->>B: render page with cancellable context and retries
+  B-->>W: PDF bytes
+  W->>O: put pdf/<job_id>.pdf
+  W->>M: mark completed with pdf_key/pdf_size
+  W-->>H: optional completed callback
+  C->>A: GET /pdf/<job_id>
+  A->>M: read status
+  A->>O: fetch PDF when completed
+  A-->>C: status JSON or application/pdf
+```
+
+### Cancellation flow
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as API instance
+  participant R as Local cancellation registry
+  participant M as Metadata store
+  participant W as Worker
+  participant B as Chromium page
+
+  C->>A: DELETE /pdf/<job_id>
+  A->>M: mark job canceled
+  A->>R: cancel in-process render context if this instance owns it
+  R-->>W: context canceled
+  W-->>B: close/cancel page operations through context
+  W->>M: leave canceled status and discard any late PDF bytes
+  A-->>C: 200 {status:"canceled"}
+```
+
 
 Important directories:
 
@@ -71,6 +138,10 @@ Successful submissions return `202 Accepted`:
 
 Submitting the same idempotency key again returns the original job ID and sets `idempotent: true`. You can also send `idempotency_key` in the JSON body.
 
+If `REQUIRE_IDEMPOTENCY_KEY=true`, requests without an `Idempotency-Key` header or `idempotency_key` field are rejected. By default idempotency keys are optional.
+
+Add `callback_url` to a request, or set `WEBHOOK_URL`, to receive a `POST` when the job completes or fails.
+
 Cancel a queued or in-flight job with either endpoint:
 
 ```sh
@@ -78,9 +149,9 @@ curl -X DELETE http://localhost:8080/pdf/<job_id>
 curl -X POST http://localhost:8080/pdf/<job_id>/cancel
 ```
 
-Validation and capacity errors:
+Validation and capacity errors return machine-readable JSON such as `{"error":"invalid_url","message":"URL must include a host","request_id":"..."}`. Common statuses are:
 
-- `400 Bad Request` for invalid JSON, empty URLs, relative URLs, or schemes other than `http`/`https`.
+- `400 Bad Request` for invalid JSON, empty URLs, relative URLs, invalid callback URLs, missing required idempotency keys, or schemes other than `http`/`https`.
 - `503 Service Unavailable` when the configured queue backend is full.
 
 ### Fetch job status or PDF
@@ -133,9 +204,11 @@ Example websocket message:
 | `GET /metrics` | Prometheus text exposition metrics for HTTP requests, queue depth, worker count, job statuses, render durations, and PDF bytes. |
 | `GET /openapi.yaml` | OpenAPI 3.0 YAML document for the public HTTP API. |
 
+Prometheus alert rules for high queue depth, high render error rate, p95 render latency, worker starvation, and storage byte growth are included under `observability/rules/` and in the Kubernetes Prometheus config.
+
 Metrics include counters and gauges such as `chromaflow_jobs_submitted_total`, `chromaflow_jobs_rejected_total`, `chromaflow_queue_depth`, `chromaflow_active_workers`, `chromaflow_jobs_in_storage`, `chromaflow_pdf_render_duration_seconds`, `chromaflow_pdf_bytes_total`, and HTTP request metrics.
 
-ChromaFlow logs are structured JSON on stdout. The log records include stable fields such as `service`, `version`, `level`, `msg`, `job_id`, `worker_id`, `url_host`, `duration`, `pdf_bytes`, and `error` where applicable.
+ChromaFlow logs are structured JSON on stdout. The log records include stable fields such as `service`, `version`, `level`, `msg`, `request_id`, `job_id`, `worker_id`, `url_host`, `duration`, `pdf_bytes`, and `error` where applicable. Incoming `X-Request-ID` headers are propagated; otherwise ChromaFlow generates one and returns it on responses.
 
 ## Configuration
 
@@ -147,9 +220,11 @@ Environment variables:
 | `NUM_WORKERS` | `0` | Number of workers. `0` auto-detects as `runtime.NumCPU() * 2`. |
 | `QUEUE_SIZE` | `100` | Queue capacity for memory mode and soft cap for Redis mode. |
 | `QUEUE_BACKEND` | `memory` | Queue backend: `memory` or `redis`. |
+| `LOG_LEVEL` | `info` | Structured log level: `debug`, `info`, `warn`, or `error`. |
 | `STORAGE_BACKEND` | `memory` | Job metadata backend: `memory` or `redis`. Defaults independently to memory. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL for shared queue/result metadata. |
 | `REDIS_KEY_PREFIX` | `chromaflow` | Redis key namespace. |
+| `REDIS_VISIBILITY_TIMEOUT` | `300` | Seconds before an unacked Redis job lease is considered abandoned and eligible for requeue. Keep above `PAGE_TIMEOUT` plus retry budget. |
 | `BLOB_BACKEND` | `memory` | PDF blob backend: `memory`, `s3`, or `minio`. |
 | `S3_ENDPOINT` | `localhost:9000` | S3-compatible endpoint for MinIO/object storage. |
 | `S3_ACCESS_KEY_ID` | `minioadmin` | S3 access key. |
@@ -157,6 +232,11 @@ Environment variables:
 | `S3_BUCKET` | `chromaflow-pdfs` | Bucket for generated PDF objects. |
 | `S3_REGION` | `us-east-1` | S3 signing region. |
 | `S3_USE_SSL` | `false` | Use HTTPS for object storage. |
+| `REQUIRE_IDEMPOTENCY_KEY` | `false` | Require clients to send an idempotency key. Optional by default. |
+| `WEBHOOK_URL` | empty | Default callback URL for completed/failed jobs when a request does not provide `callback_url`. |
+| `WEBHOOK_TIMEOUT` | `10` | Webhook HTTP timeout in seconds. |
+| `RENDER_MAX_RETRIES` | `1` | Number of retries after the first render attempt for transient browser/page failures. |
+| `RENDER_RETRY_BACKOFF_MS` | `500` | Delay between render retries in milliseconds. |
 | `PAGE_TIMEOUT` | `30` | Per-page render timeout in seconds. |
 | `RESULT_TTL` | `3600` | Reserved for future result expiration. |
 | `CHROME_WS_URL` | empty | Existing Chrome DevTools websocket URL. Empty launches local Chromium. |
@@ -184,6 +264,31 @@ $env:PORT="8080"; .\dist\chromaflow.exe
 ```
 
 Make sure Chrome or Chromium is installed and set `CHROME_BIN` if it is not discoverable from `PATH`.
+
+### Local Chrome/Chromium setup
+
+ChromaFlow uses the Chrome DevTools Protocol through go-rod. You can either let ChromaFlow launch a local browser or point `CHROME_WS_URL` at an already-running Chrome/Chromium instance.
+
+**Linux**
+
+- Debian/Ubuntu containers and hosts usually work with `chromium` or `chromium-browser` packages.
+- If the binary is not on `PATH`, set `CHROME_BIN=/usr/bin/chromium` or `CHROME_BIN=/usr/bin/chromium-browser`.
+- Containerized runs use `NoSandbox(true)` for compatibility; hardened production deployments should review Chromium sandbox requirements for their runtime.
+
+**macOS**
+
+- Install Google Chrome normally or with Homebrew: `brew install --cask google-chrome`.
+- If auto-detection fails, set `CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`.
+- For an external browser, launch Chrome with remote debugging, for example: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --remote-debugging-port=9222`, then set `CHROME_WS_URL` to the websocket URL exposed by Chrome.
+
+**Windows**
+
+- Install Google Chrome or Microsoft Edge.
+- Set `CHROME_BIN` to a full executable path such as `C:\Program Files\Google\Chrome\Application\chrome.exe` if auto-detection fails.
+- For a separately managed browser, launch `chrome.exe --headless=new --remote-debugging-port=9222` and set `CHROME_WS_URL` to the DevTools websocket endpoint.
+
+`PAGE_TIMEOUT` applies to each render attempt, and cancellation requests cancel the in-process render context for jobs owned by the current instance.
+
 
 ## Run with Docker
 

@@ -43,8 +43,18 @@ func (s *RedisStorage) Set(ctx context.Context, jobID string, result *queue.JobR
 		}
 	}
 	idempotencyKey := result.IdempotencyKey
-	if idempotencyKey == "" && existing != nil {
-		idempotencyKey = existing.IdempotencyKey
+	callbackURL := result.CallbackURL
+	requestID := result.RequestID
+	if existing != nil {
+		if idempotencyKey == "" {
+			idempotencyKey = existing.IdempotencyKey
+		}
+		if callbackURL == "" {
+			callbackURL = existing.CallbackURL
+		}
+		if requestID == "" {
+			requestID = existing.RequestID
+		}
 	}
 	if existing == nil {
 		_, _ = s.client.Do(ctx, "LPUSH", s.orderKey(), jobID)
@@ -56,6 +66,8 @@ func (s *RedisStorage) Set(ctx context.Context, jobID string, result *queue.JobR
 		"pdf_size", strconv.Itoa(result.PDFSize),
 		"error", result.Error,
 		"idempotency_key", idempotencyKey,
+		"callback_url", callbackURL,
+		"request_id", requestID,
 		"created_at", createdAt.Format(time.RFC3339Nano),
 		"updated_at", now.Format(time.RFC3339Nano),
 	)
@@ -97,7 +109,7 @@ func (s *RedisStorage) Get(ctx context.Context, jobID string) (*queue.JobResult,
 	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
 	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"])
 	pdfSize, _ := strconv.Atoi(m["pdf_size"])
-	return &queue.JobResult{URL: m["url"], Status: queue.JobStatus(m["status"]), PDFKey: m["pdf_key"], PDFSize: pdfSize, Error: m["error"], IdempotencyKey: m["idempotency_key"], CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
+	return &queue.JobResult{URL: m["url"], Status: queue.JobStatus(m["status"]), PDFKey: m["pdf_key"], PDFSize: pdfSize, Error: m["error"], IdempotencyKey: m["idempotency_key"], CallbackURL: m["callback_url"], RequestID: m["request_id"], CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
 }
 
 func (s *RedisStorage) Cancel(ctx context.Context, jobID string) (*queue.JobResult, error) {
