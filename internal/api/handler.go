@@ -1,12 +1,14 @@
 package api
 
 import (
+	"chromaflow/internal/observability"
 	"chromaflow/internal/queue"
 	"chromaflow/internal/realtime"
 	"chromaflow/internal/storage"
 	"encoding/json"
 	"errors"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,10 +21,15 @@ type Handler struct {
 	queue   *queue.MemoryQueue
 	storage *storage.MemoryStorage
 	hub     *realtime.Hub
+	metrics *observability.Metrics
+	logger  *slog.Logger
 }
 
-func NewHandler(q *queue.MemoryQueue, s *storage.MemoryStorage, hub *realtime.Hub) *Handler {
-	return &Handler{queue: q, storage: s, hub: hub}
+func NewHandler(q *queue.MemoryQueue, s *storage.MemoryStorage, hub *realtime.Hub, metrics *observability.Metrics, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Handler{queue: q, storage: s, hub: hub, metrics: metrics, logger: logger}
 }
 
 type SubmitRequest struct {
@@ -39,12 +46,14 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	var req SubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.recordRejected("invalid_json")
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
 	req.URL = strings.TrimSpace(req.URL)
 	if err := validateURL(req.URL); err != nil {
+		h.recordRejected("invalid_url")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -65,12 +74,19 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	if err := h.queue.Push(job); err != nil {
 		h.storage.Delete(jobID)
 		if errors.Is(err, queue.ErrQueueFull) {
+			h.recordRejected("queue_full")
+			h.logger.Warn("job rejected", slog.String("reason", "queue_full"), slog.String("job_id", jobID))
 			http.Error(w, "Queue is full", http.StatusServiceUnavailable)
 			return
 		}
+		h.recordRejected("enqueue_error")
+		h.logger.Error("job enqueue failed", slog.String("job_id", jobID), slog.String("error", err.Error()))
 		http.Error(w, "Failed to queue job", http.StatusInternalServerError)
 		return
 	}
+
+	h.recordSubmitted()
+	h.logger.Info("job queued", slog.String("job_id", jobID), slog.String("url", req.URL))
 
 	resp := SubmitResponse{
 		JobID:     jobID,
@@ -129,6 +145,24 @@ func (h *Handler) Readyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+}
+
+func (h *Handler) OpenAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(openAPISpec)
+}
+
+func (h *Handler) recordSubmitted() {
+	if h.metrics != nil {
+		h.metrics.JobSubmitted()
+	}
+}
+
+func (h *Handler) recordRejected(reason string) {
+	if h.metrics != nil {
+		h.metrics.JobRejected(reason)
+	}
 }
 
 func validateURL(rawURL string) error {

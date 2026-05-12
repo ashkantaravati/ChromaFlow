@@ -26,3 +26,11 @@ func (q *MemoryQueue) Push(job Job) error {
 func (q *MemoryQueue) Pop() <-chan Job {
 	return q.jobs
 }
+
+func (q *MemoryQueue) Len() int {
+	return len(q.jobs)
+}
+
+func (q *MemoryQueue) Cap() int {
+	return cap(q.jobs)
+}

@@ -1,0 +1,25 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {"datasource": {"type": "prometheus", "uid": "Prometheus"}, "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []}, "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}, "id": 1, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}, "targets": [{"expr": "chromaflow_queue_depth", "legendFormat": "queue depth", "refId": "A"}], "title": "Queue depth", "type": "timeseries"},
+    {"datasource": {"type": "prometheus", "uid": "Prometheus"}, "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []}, "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}, "id": 2, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}, "targets": [{"expr": "sum by (status) (chromaflow_jobs_in_storage)", "legendFormat": "{{status}}", "refId": "A"}], "title": "Jobs by status", "type": "timeseries"},
+    {"datasource": {"type": "prometheus", "uid": "Prometheus"}, "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []}, "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}, "id": 3, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(chromaflow_pdf_render_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "A"}], "title": "PDF render p95", "type": "timeseries"},
+    {"datasource": {"type": "loki", "uid": "Loki"}, "gridPos": {"h": 10, "w": 24, "x": 0, "y": 8}, "id": 4, "options": {"dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": true, "showCommonLabels": false, "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true}, "targets": [{"expr": "{compose_service=\"chromaflow\"}", "refId": "A"}], "title": "ChromaFlow logs", "type": "logs"}
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["chromaflow"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ChromaFlow Overview",
+  "uid": "chromaflow-overview",
+  "version": 1,
+  "weekStart": ""
+}

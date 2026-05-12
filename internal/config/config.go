@@ -1,7 +1,8 @@
 package config
 
 import (
-	"log"
+	"log/slog"
+	"os"
 	"runtime"
 
 	"github.com/caarlos0/env/v10"
@@ -19,7 +20,8 @@ type Config struct {
 func Load() *Config {
 	cfg := &Config{}
 	if err := env.Parse(cfg); err != nil {
-		log.Fatalf("Failed to parse config: %v", err)
+		slog.Error("failed to parse config", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	// Auto-detect workers

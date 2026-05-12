@@ -15,6 +15,8 @@ The current architecture is single-node and intentionally simple. Horizontal sca
 - Build local binary: `GOCACHE=/tmp/chromaflow-gocache CGO_ENABLED=0 go build -trimpath -o dist/chromaflow ./cmd/server`
 - Build Docker image: `docker build -t chromaflow .`
 - Run Docker image: `docker run --rm -p 8080:8080 chromaflow`
+- Run full local stack: `docker compose up --build`
+- Apply Kubernetes manifests: `kubectl apply -f k8s/namespace.yaml && kubectl apply -f k8s/`
 
 Use `/tmp/chromaflow-gocache` for Go commands when the default Go cache may not be writable in a sandbox.
 
@@ -24,10 +26,13 @@ Use `/tmp/chromaflow-gocache` for Go commands when the default Go cache may not 
 - `internal/api/handler.go`: dashboard page, `POST /pdf`, `GET /pdf/{id}`, health/readiness endpoints, and `GET /ws/jobs` websocket handler.
 - `internal/config/config.go`: environment configuration.
 - `internal/pdf/generator.go`: Chromium launch/connect and PDF rendering.
+- `internal/observability/`: Prometheus-format metrics and structured JSON logging setup.
 - `internal/queue/`: in-memory job queue and job/result types.
 - `internal/realtime/`: small stdlib websocket hub for broadcasting queue snapshots.
 - `internal/storage/`: in-memory result storage and job snapshot listing.
 - `internal/worker/`: worker pool and job processing.
+- `observability/`: Docker Compose Prometheus, Grafana, Loki, and Promtail configuration.
+- `k8s/`: Kubernetes manifests for the app, ingress, services, and monitoring stack.
 - `.github/workflows/`: CI and release automation.
 
 ## Commit Guidelines
@@ -44,6 +49,6 @@ Use semantic commit messages in the form `type(scope): short imperative summary`
 - Avoid `Must*` Rod calls in production paths; return errors so failed renders do not crash the service.
 - Keep per-job timeout/cancellation behavior intact when editing PDF generation.
 - Be careful with arbitrary URLs. Changes that broaden URL support must consider SSRF, local file access, redirects, private network targets, and metadata services.
-- Do not introduce persistent storage, authentication, Redis, or external queues without updating `README.md` and `IMPROVEMENTS.md`.
-- Add or update tests for queue behavior, handler status transitions, websocket snapshots, and PDF generation abstractions when changing those areas.
+- Do not introduce persistent storage, authentication, Redis, RabbitMQ, Kafka, MinIO, or external queues without updating `README.md`, `IMPROVEMENTS.md`, Docker Compose, OpenAPI docs, and Kubernetes manifests.
+- Add or update tests for queue behavior, handler status transitions, websocket snapshots, metrics/logging instrumentation, OpenAPI docs, deployment manifests, and PDF generation abstractions when changing those areas.
 - If a change affects the dashboard UI, take a screenshot when feasible.
