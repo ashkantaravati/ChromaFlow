@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"chromaflow/internal/observability"
 	"chromaflow/internal/queue"
 	"errors"
 	"sort"
@@ -83,6 +84,25 @@ func (s *MemoryStorage) Get(jobID string) (*queue.JobResult, error) {
 		return nil, errors.New("job not found")
 	}
 	return result, nil
+}
+
+func (s *MemoryStorage) Stats() observability.StorageStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := observability.StorageStats{
+		Total:    len(s.results),
+		ByStatus: make(map[queue.JobStatus]int),
+	}
+	for _, result := range s.results {
+		stats.ByStatus[result.Status]++
+		stats.PDFBytes += len(result.PDF)
+		if stats.OldestJobAt.IsZero() || result.CreatedAt.Before(stats.OldestJobAt) {
+			stats.OldestJobAt = result.CreatedAt
+		}
+	}
+
+	return stats
 }
 
 func (s *MemoryStorage) List() []queue.JobSnapshot {

@@ -12,7 +12,7 @@ import (
 )
 
 func TestSubmitJobAcceptsHTTPURL(t *testing.T) {
-	h := NewHandler(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), realtime.NewHub())
+	h := NewHandler(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), realtime.NewHub(), nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/pdf", strings.NewReader(`{"url":"https://example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -33,7 +33,7 @@ func TestSubmitJobAcceptsHTTPURL(t *testing.T) {
 }
 
 func TestSubmitJobRejectsUnsupportedScheme(t *testing.T) {
-	h := NewHandler(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), realtime.NewHub())
+	h := NewHandler(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), realtime.NewHub(), nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/pdf", strings.NewReader(`{"url":"file:///etc/passwd"}`))
 	rr := httptest.NewRecorder()
 
@@ -45,7 +45,7 @@ func TestSubmitJobRejectsUnsupportedScheme(t *testing.T) {
 }
 
 func TestSubmitJobReturnsServiceUnavailableWhenQueueFull(t *testing.T) {
-	h := NewHandler(queue.NewMemoryQueue(0), storage.NewMemoryStorage(), realtime.NewHub())
+	h := NewHandler(queue.NewMemoryQueue(0), storage.NewMemoryStorage(), realtime.NewHub(), nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/pdf", strings.NewReader(`{"url":"https://example.com"}`))
 	rr := httptest.NewRecorder()
 
@@ -57,7 +57,7 @@ func TestSubmitJobReturnsServiceUnavailableWhenQueueFull(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	h := NewHandler(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), realtime.NewHub())
+	h := NewHandler(queue.NewMemoryQueue(1), storage.NewMemoryStorage(), realtime.NewHub(), nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()
 

@@ -3,7 +3,7 @@ GOCACHE ?= /tmp/chromaflow-gocache
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: test vet build run docker-build release-snapshot clean
+.PHONY: test vet build run docker-build compose-up k8s-apply release-snapshot clean
 
 test:
 	GOCACHE=$(GOCACHE) $(GO) test ./...
@@ -20,6 +20,13 @@ run:
 
 docker-build:
 	docker build -t chromaflow .
+
+compose-up:
+	docker compose up --build
+
+k8s-apply:
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/
 
 release-snapshot:
 	mkdir -p dist
