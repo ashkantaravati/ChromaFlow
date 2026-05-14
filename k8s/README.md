@@ -1,6 +1,6 @@
 # Kubernetes manifests
 
-Apply these manifests to deploy ChromaFlow plus Prometheus, Grafana, Loki, and Promtail into the `chromaflow` namespace:
+Apply these manifests to deploy ChromaFlow, example Redis/MinIO dependencies, Prometheus, Grafana, Loki, and Promtail into the `chromaflow` namespace:
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
@@ -9,6 +9,6 @@ kubectl apply -f k8s/
 
 Before applying in a real cluster, replace `ghcr.io/OWNER/REPO:latest` in `chromaflow.yaml` with the published image for your fork or repository.
 
-The manifests are intentionally plain YAML so they work in many Kubernetes-compatible environments. For production, replace `emptyDir` storage with persistent volumes, set real hostnames/TLS on ingress resources, and move Grafana credentials to your secret manager.
+The included Redis and MinIO manifests are development-friendly examples for the shared queue/result and object-storage backends. For production, use managed Redis/S3-compatible services or add persistent volumes, credentials from Secrets, backup policies, TLS, real hostnames, and resource limits that match your workload.
 
-Future Redis, RabbitMQ/Kafka, MinIO, and token-auth configuration should be added as separate manifests or a Helm chart so the core single-node deployment remains easy to run.
+The manifests are intentionally plain YAML so they work in many Kubernetes-compatible environments. A future Helm chart or Kustomize overlay can layer production storage classes, secret management, ingress, and autoscaling over these defaults.

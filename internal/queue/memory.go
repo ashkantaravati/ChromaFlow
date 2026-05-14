@@ -1,20 +1,16 @@
 package queue
 
-import "errors"
-
-var ErrQueueFull = errors.New("queue is full")
+import "context"
 
 type MemoryQueue struct {
 	jobs chan Job
 }
 
 func NewMemoryQueue(size int) *MemoryQueue {
-	return &MemoryQueue{
-		jobs: make(chan Job, size),
-	}
+	return &MemoryQueue{jobs: make(chan Job, size)}
 }
 
-func (q *MemoryQueue) Push(job Job) error {
+func (q *MemoryQueue) Push(ctx context.Context, job Job) error {
 	select {
 	case q.jobs <- job:
 		return nil
@@ -23,14 +19,19 @@ func (q *MemoryQueue) Push(job Job) error {
 	}
 }
 
-func (q *MemoryQueue) Pop() <-chan Job {
-	return q.jobs
+func (q *MemoryQueue) Pop(ctx context.Context) (Job, error) {
+	select {
+	case <-ctx.Done():
+		return Job{}, ctx.Err()
+	case job := <-q.jobs:
+		return job, nil
+	}
 }
 
-func (q *MemoryQueue) Len() int {
-	return len(q.jobs)
-}
+func (q *MemoryQueue) Ack(ctx context.Context, job Job) error { return nil }
 
-func (q *MemoryQueue) Cap() int {
-	return cap(q.jobs)
-}
+func (q *MemoryQueue) PopChan() <-chan Job { return q.jobs }
+
+func (q *MemoryQueue) Len(ctx context.Context) (int, error) { return len(q.jobs), nil }
+
+func (q *MemoryQueue) Cap() int { return cap(q.jobs) }

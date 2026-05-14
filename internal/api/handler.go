@@ -1,6 +1,8 @@
 package api
 
 import (
+	"chromaflow/internal/blob"
+	"chromaflow/internal/cancellation"
 	"chromaflow/internal/observability"
 	"chromaflow/internal/queue"
 	"chromaflow/internal/realtime"
@@ -18,27 +20,45 @@ import (
 )
 
 type Handler struct {
-	queue   *queue.MemoryQueue
-	storage *storage.MemoryStorage
+	queue   queue.Backend
+	storage storage.Store
+	blobs   blob.Store
 	hub     *realtime.Hub
 	metrics *observability.Metrics
 	logger  *slog.Logger
+	cancels *cancellation.Registry
+	options HandlerOptions
 }
 
-func NewHandler(q *queue.MemoryQueue, s *storage.MemoryStorage, hub *realtime.Hub, metrics *observability.Metrics, logger *slog.Logger) *Handler {
+type HandlerOptions struct {
+	RequireIdempotencyKey bool
+	DefaultWebhookURL     string
+}
+
+func NewHandler(q queue.Backend, s storage.Store, blobs blob.Store, hub *realtime.Hub, metrics *observability.Metrics, logger *slog.Logger) *Handler {
+	return NewHandlerWithOptions(q, s, blobs, hub, metrics, logger, nil, HandlerOptions{})
+}
+
+func NewHandlerWithOptions(q queue.Backend, s storage.Store, blobs blob.Store, hub *realtime.Hub, metrics *observability.Metrics, logger *slog.Logger, cancels *cancellation.Registry, options HandlerOptions) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{queue: q, storage: s, hub: hub, metrics: metrics, logger: logger}
+	if cancels == nil {
+		cancels = cancellation.NewRegistry()
+	}
+	return &Handler{queue: q, storage: s, blobs: blobs, hub: hub, metrics: metrics, logger: logger, cancels: cancels, options: options}
 }
 
 type SubmitRequest struct {
-	URL string `json:"url"`
+	URL            string `json:"url"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	CallbackURL    string `json:"callback_url,omitempty"`
 }
 
 type SubmitResponse struct {
-	JobID     string `json:"job_id"`
-	StatusURL string `json:"status_url"`
+	JobID      string `json:"job_id"`
+	StatusURL  string `json:"status_url"`
+	Idempotent bool   `json:"idempotent,omitempty"`
 }
 
 func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
@@ -47,46 +67,90 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	var req SubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.recordRejected("invalid_json")
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		h.writeError(w, r, http.StatusBadRequest, "invalid_json", "Invalid request")
 		return
 	}
 
 	req.URL = strings.TrimSpace(req.URL)
 	if err := validateURL(req.URL); err != nil {
 		h.recordRejected("invalid_url")
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		h.writeError(w, r, http.StatusBadRequest, "invalid_url", err.Error())
 		return
 	}
 
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	if h.options.RequireIdempotencyKey && idempotencyKey == "" {
+		h.recordRejected("missing_idempotency_key")
+		h.writeError(w, r, http.StatusBadRequest, "missing_idempotency_key", "Idempotency key is required")
+		return
+	}
+	callbackURL := strings.TrimSpace(req.CallbackURL)
+	if callbackURL == "" {
+		callbackURL = strings.TrimSpace(h.options.DefaultWebhookURL)
+	}
+	if callbackURL != "" {
+		if err := validateURL(callbackURL); err != nil {
+			h.recordRejected("invalid_callback_url")
+			h.writeError(w, r, http.StatusBadRequest, "invalid_callback_url", "callback_url "+err.Error())
+			return
+		}
+	}
+
 	jobID := uuid.New().String()
-	job := queue.Job{ID: jobID, URL: req.URL}
+	reservedJobID, reserved, err := h.storage.ReserveIdempotencyKey(r.Context(), idempotencyKey, jobID)
+	if err != nil {
+		h.recordRejected("idempotency_error")
+		h.logger.Error("idempotency reservation failed", slog.String("error", err.Error()), slog.String("request_id", observability.RequestIDFromContext(r.Context())))
+		h.writeError(w, r, http.StatusInternalServerError, "idempotency_error", "Failed to reserve idempotency key")
+		return
+	}
+	if !reserved {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(SubmitResponse{JobID: reservedJobID, StatusURL: "/pdf/" + reservedJobID, Idempotent: true})
+		return
+	}
+
+	requestID := observability.RequestIDFromContext(r.Context())
+	job := queue.Job{ID: jobID, URL: req.URL, IdempotencyKey: idempotencyKey, CallbackURL: callbackURL, RequestID: requestID}
 	now := time.Now().UTC()
 
 	// Initialize job as pending
-	h.storage.Set(jobID, &queue.JobResult{
-		URL:       req.URL,
-		Status:    queue.StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
-	})
+	if err := h.storage.Set(r.Context(), jobID, &queue.JobResult{
+		URL:            req.URL,
+		Status:         queue.StatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		IdempotencyKey: idempotencyKey,
+		CallbackURL:    callbackURL,
+		RequestID:      requestID,
+	}); err != nil {
+		h.recordRejected("storage_error")
+		h.logger.Error("job metadata initialization failed", slog.String("job_id", jobID), slog.String("error", err.Error()), slog.String("request_id", requestID))
+		h.writeError(w, r, http.StatusInternalServerError, "storage_error", "Failed to initialize job metadata")
+		return
+	}
 
 	// Push to queue
-	if err := h.queue.Push(job); err != nil {
-		h.storage.Delete(jobID)
+	if err := h.queue.Push(r.Context(), job); err != nil {
+		_ = h.storage.Delete(r.Context(), jobID)
 		if errors.Is(err, queue.ErrQueueFull) {
 			h.recordRejected("queue_full")
-			h.logger.Warn("job rejected", slog.String("reason", "queue_full"), slog.String("job_id", jobID))
-			http.Error(w, "Queue is full", http.StatusServiceUnavailable)
+			h.logger.Warn("job rejected", slog.String("reason", "queue_full"), slog.String("job_id", jobID), slog.String("request_id", requestID))
+			h.writeError(w, r, http.StatusServiceUnavailable, "queue_full", "Queue is full")
 			return
 		}
 		h.recordRejected("enqueue_error")
-		h.logger.Error("job enqueue failed", slog.String("job_id", jobID), slog.String("error", err.Error()))
-		http.Error(w, "Failed to queue job", http.StatusInternalServerError)
+		h.logger.Error("job enqueue failed", slog.String("job_id", jobID), slog.String("error", err.Error()), slog.String("request_id", requestID))
+		h.writeError(w, r, http.StatusInternalServerError, "enqueue_error", "Failed to queue job")
 		return
 	}
 
 	h.recordSubmitted()
-	h.logger.Info("job queued", slog.String("job_id", jobID), slog.String("url", req.URL))
+	h.logger.Info("job queued", slog.String("job_id", jobID), slog.String("url", req.URL), slog.String("request_id", requestID))
 
 	resp := SubmitResponse{
 		JobID:     jobID,
@@ -95,28 +159,34 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 
-	result, err := h.storage.Get(jobID)
+	result, err := h.storage.Get(r.Context(), jobID)
 	if err != nil {
-		http.Error(w, "Job not found", http.StatusNotFound)
+		h.writeError(w, r, http.StatusNotFound, "job_not_found", "Job not found")
 		return
 	}
 
 	if result.Status == queue.StatusCompleted {
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", "attachment; filename="+jobID+".pdf")
-		w.Write(result.PDF)
+		pdfBytes, err := h.blobs.Get(r.Context(), result.PDFKey)
+		if err != nil {
+			h.logger.Error("pdf fetch failed", slog.String("job_id", jobID), slog.String("error", err.Error()))
+			h.writeError(w, r, http.StatusInternalServerError, "pdf_not_found", "PDF not found")
+			return
+		}
+		_, _ = w.Write(pdfBytes)
 		return
 	}
 
 	// Return status as JSON
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"job_id": jobID,
 		"url":    result.URL,
 		"status": result.Status,
@@ -127,12 +197,29 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := dashboardTemplate.Execute(w, nil); err != nil {
-		http.Error(w, "Failed to render dashboard", http.StatusInternalServerError)
+		h.writeError(w, r, http.StatusInternalServerError, "dashboard_render_failed", "Failed to render dashboard")
 	}
 }
 
 func (h *Handler) JobsWebSocket(w http.ResponseWriter, r *http.Request) {
-	h.hub.ServeJobs(w, r, h.storage.List)
+	h.hub.ServeJobs(w, r, func() []queue.JobSnapshot { return h.storage.List(r.Context()) })
+}
+
+func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("id")
+	result, err := h.storage.Cancel(r.Context(), jobID)
+	h.cancels.Cancel(jobID)
+	if err != nil {
+		h.writeError(w, r, http.StatusNotFound, "job_not_found", "Job not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"job_id": jobID,
+		"url":    result.URL,
+		"status": result.Status,
+		"error":  result.Error,
+	})
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +238,18 @@ func (h *Handler) OpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(openAPISpec)
+}
+
+type ErrorResponse struct {
+	Error     string `json:"error"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(ErrorResponse{Error: code, Message: message, RequestID: observability.RequestIDFromContext(r.Context())})
 }
 
 func (h *Handler) recordSubmitted() {

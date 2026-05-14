@@ -3,10 +3,13 @@ GOCACHE ?= /tmp/chromaflow-gocache
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: test vet build run docker-build compose-up k8s-apply release-snapshot clean
+.PHONY: test test-race vet build run docker-build compose-up load-test k8s-apply release-snapshot clean
 
 test:
 	GOCACHE=$(GOCACHE) $(GO) test ./...
+
+test-race:
+	GOCACHE=$(GOCACHE) $(GO) test -race ./...
 
 vet:
 	GOCACHE=$(GOCACHE) $(GO) vet ./...
@@ -23,6 +26,9 @@ docker-build:
 
 compose-up:
 	docker compose up --build
+
+load-test:
+	GOCACHE=$(GOCACHE) $(GO) run ./tools/loadtest -base-url $${BASE_URL:-http://127.0.0.1:8080} -target-url $${TARGET_URL:-https://example.com} -requests $${REQUESTS:-20} -concurrency $${CONCURRENCY:-4}
 
 k8s-apply:
 	kubectl apply -f k8s/namespace.yaml

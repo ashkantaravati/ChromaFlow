@@ -1,10 +1,33 @@
 package queue
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+var (
+	ErrQueueFull       = errors.New("queue is full")
+	ErrDuplicateJob    = errors.New("duplicate idempotency key")
+	ErrJobNotAvailable = errors.New("job not available")
+)
+
+type Backend interface {
+	Push(ctx context.Context, job Job) error
+	Pop(ctx context.Context) (Job, error)
+	Ack(ctx context.Context, job Job) error
+	Len(ctx context.Context) (int, error)
+	Cap() int
+}
 
 type Job struct {
-	ID  string
-	URL string
+	ID             string
+	URL            string
+	IdempotencyKey string
+	CallbackURL    string
+	RequestID      string
+	QueueMessageID string
+	LeaseUntil     time.Time
 }
 
 type JobStatus string
@@ -14,15 +37,21 @@ const (
 	StatusProcessing JobStatus = "processing"
 	StatusCompleted  JobStatus = "completed"
 	StatusFailed     JobStatus = "failed"
+	StatusCanceled   JobStatus = "canceled"
 )
 
 type JobResult struct {
-	URL       string
-	Status    JobStatus
-	PDF       []byte // PDF bytes
-	Error     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	URL            string
+	Status         JobStatus
+	PDF            []byte // Used only by the in-memory blob backend for backwards-compatible tests.
+	PDFKey         string
+	PDFSize        int
+	Error          string
+	IdempotencyKey string
+	CallbackURL    string
+	RequestID      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type JobSnapshot struct {
